@@ -1,0 +1,19 @@
+{
+  "name": "ai-chatbot-store",
+  "version": "2.0.0",
+  "description": "AI Chatbot with file generation, web search, image upload, and persistent history",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "express": "^4.21.1",
+    "dotenv": "^16.4.5",
+    "pdfkit": "^0.15.1",
+    "docx": "^9.1.0",
+    "cors": "^2.8.5",
+    "better-sqlite3": "^11.6.0"
+  }
+}
