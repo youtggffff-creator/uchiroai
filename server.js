@@ -16,6 +16,7 @@ const { saveMessage, getHistory, clearHistory, saveFact, getFacts, deleteFact } 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// បង្កើត Folder សម្រាប់ទាញយក File ប្រសិនបើមិនទាន់មាន
 const DOWNLOADS_DIR = path.join(__dirname, 'public', 'downloads');
 if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
 
@@ -28,11 +29,20 @@ if (!process.env.ANTHROPIC_API_KEY) {
   process.exit(1);
 }
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// កំណត់ Anthropic SDK (Support ទាំង Official & Custom Proxy Base URL)
+const anthropicConfig = { apiKey: process.env.ANTHROPIC_API_KEY };
+if (process.env.ANTHROPIC_BASE_URL) {
+  anthropicConfig.baseURL = process.env.ANTHROPIC_BASE_URL;
+}
+const anthropic = new Anthropic(anthropicConfig);
 
 // ============================================
 // FILE GENERATION HELPERS
 // ============================================
+function slugify(text) {
+  return (text || 'document').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40) || 'document';
+}
+
 function createPDF(content, title) {
   const filename = `${slugify(title)}-${crypto.randomBytes(4).toString('hex')}.pdf`;
   const filepath = path.join(DOWNLOADS_DIR, filename);
@@ -61,10 +71,6 @@ async function createDocx(content, title) {
   const buffer = await Packer.toBuffer(doc);
   fs.writeFileSync(filepath, buffer);
   return filename;
-}
-
-function slugify(text) {
-  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40) || 'document';
 }
 
 // ============================================
@@ -108,7 +114,7 @@ app.post('/api/chat', async (req, res) => {
     if (!message && !image) return res.status(400).json({ error: 'សូមផ្ញើសារ' });
     if (!sessionId) return res.status(400).json({ error: 'sessionId ត្រូវការ' });
 
-    // ១. ទាញយក history ចាស់ + memory
+    // ១. ទាញយក history ចាស់ + memory ពី database
     const pastMessages = getHistory(sessionId).map((m) => ({
       role: m.role,
       content: m.content,
@@ -121,9 +127,9 @@ app.post('/api/chat', async (req, res) => {
 
     const systemPrompt = `អ្នកឈ្មោះ Uchiro — ជា AI assistant ផ្ទាល់ខ្លួនរបស់ user។ អត្តចរិកអ្នក: ឆ្លាត, ស្មោះត្រង់, មានថាមពល, ជួយអ្នកប្រើប្រាស់ដោយផ្ទាល់ និងកក់ក្តៅ។ ឆ្លើយជាភាសាដូចដែល user សរសេរមក (ខ្មែរ ឬ អង់គ្លេស)។${memoryBlock}`;
 
-    // ២. សាងសង់ user message
+    // ២. រៀបចំ user message ថ្មី (Text + Image support)
     const userContent = [];
-    if (image) {
+    if (image && image.base64 && image.mediaType) {
       userContent.push({
         type: 'image',
         source: { type: 'base64', media_type: image.mediaType, data: image.base64 },
@@ -133,30 +139,36 @@ app.post('/api/chat', async (req, res) => {
 
     let messages = [...pastMessages, { role: 'user', content: userContent }];
 
-    // ៣. Save user message
+    // ៣. រក្សាទុកសាររបស់ user ចូល database
     saveMessage(sessionId, 'user', message || '[បានផ្ញើរូបភាព]');
 
     let downloadUrl = null;
     let finalText = '';
     let newFacts = [];
 
-    // ៤. Agent loop
+    // ៤. Agent loop (Tool handling)
     for (let turn = 0; turn < 5; turn++) {
       const response = await anthropic.messages.create({
-        model: 'claude-3-5-sonnet-20241022', // ✅ Fixed model name
+        model: process.env.MODEL_NAME || 'claude-3-5-sonnet-20241022',
         max_tokens: 2000,
         system: systemPrompt,
         tools,
         messages,
       });
 
+      // ប្រមូល Text
       const textBlocks = response.content.filter((b) => b.type === 'text');
-      if (textBlocks.length) finalText += textBlocks.map((b) => b.text).join('\n');
+      if (textBlocks.length) {
+        finalText += textBlocks.map((b) => b.text).join('\n');
+      }
 
+      // ប្រសិនបើ AI មិនបានហៅ Tool អ្វីទេ នោះបញ្ចប់ Loop
       if (response.stop_reason !== 'tool_use') break;
 
+      // បន្ថែម Assistant Response ចូល Memory
       messages.push({ role: 'assistant', content: response.content });
 
+      // ដំណើរការ Custom Tools
       const toolResults = [];
       for (const block of response.content) {
         if (block.type !== 'tool_use') continue;
@@ -188,7 +200,7 @@ app.post('/api/chat', async (req, res) => {
       messages.push({ role: 'user', content: toolResults });
     }
 
-    // ៥. Save assistant reply
+    // ៥. រក្សាទុកសាររបស់ Assistant ចូល database
     saveMessage(sessionId, 'assistant', finalText, downloadUrl);
 
     res.json({ reply: finalText, downloadUrl, usedWebSearch: false, newFacts });
@@ -229,15 +241,19 @@ app.delete('/api/memory/:factId', (req, res) => {
 // FILES CATALOG
 // ============================================
 app.get('/api/files', (req, res) => {
-  const files = fs
-    .readdirSync(DOWNLOADS_DIR)
-    .filter((f) => f !== '.gitkeep')
-    .map((f) => {
-      const stat = fs.statSync(path.join(DOWNLOADS_DIR, f));
-      return { name: f, url: `/downloads/${f}`, size: stat.size, createdAt: stat.birthtime };
-    })
-    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  res.json({ files });
+  try {
+    const files = fs
+      .readdirSync(DOWNLOADS_DIR)
+      .filter((f) => f !== '.gitkeep')
+      .map((f) => {
+        const stat = fs.statSync(path.join(DOWNLOADS_DIR, f));
+        return { name: f, url: `/downloads/${f}`, size: stat.size, createdAt: stat.birthtime };
+      })
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    res.json({ files });
+  } catch (err) {
+    res.json({ files: [] });
+  }
 });
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
