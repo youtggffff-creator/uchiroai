@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="km">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Uchiro — Your AI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Anton&family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="shell">
+
+    <!-- ============ SIDEBAR ============ -->
+    <aside class="sidebar" id="sidebar">
+      <div class="brand-block">
+        <div class="sun-mark" id="sunMark">
+          <span class="sun-core"></span>
+        </div>
+        <div class="brand-text">
+          <div class="brand-name">UCHIRO</div>
+          <div class="brand-tag">robot / programming</div>
+        </div>
+      </div>
+
+      <div class="side-section">
+        <div class="side-label">ឧបករណ៍</div>
+        <div class="catalog">
+          <button class="tool-chip" data-prompt="សរសេរ report មួយអំពី ">
+            <span class="chip-icon">📄</span> សរសេរ Document
+          </button>
+          <button class="tool-chip" data-prompt="ស្វែងរកព័ត៌មានថ្មីៗអំពី ">
+            <span class="chip-icon">🔍</span> ស្វែងរក Internet
+          </button>
+          <button class="tool-chip" id="attachChip">
+            <span class="chip-icon">📷</span> វិភាគរូបភាព
+          </button>
+          <button class="tool-chip" data-prompt="ចាំថា ">
+            <span class="chip-icon">🧠</span> ចាំរឿងនេះ
+          </button>
+        </div>
+      </div>
+
+      <div class="side-section">
+        <div class="side-label-row">
+          <span class="side-label">អ្វីដែល Uchiro ចាំ</span>
+          <span class="count-badge" id="memCount">0</span>
+        </div>
+        <div class="memory-list" id="memoryList">
+          <div class="empty-hint">មិនទាន់មានអ្វីទេ — Uchiro នឹងចាំពេលអ្នកប្រាប់</div>
+        </div>
+      </div>
+
+      <div class="side-section">
+        <div class="side-label-row">
+          <span class="side-label">File ដែលបានបង្កើត</span>
+          <span class="count-badge" id="fileCount">0</span>
+        </div>
+        <div class="files-list" id="filesList">
+          <div class="empty-hint">មិនទាន់មាន file ទេ</div>
+        </div>
+      </div>
+
+      <button class="clear-all-btn" id="clearBtn">🗑 សម្អាតការសន្ទនា</button>
+    </aside>
+
+    <!-- ============ MAIN CHAT ============ -->
+    <main class="main">
+      <header class="topbar">
+        <button class="menu-toggle" id="menuToggle">☰</button>
+        <div class="status-line">
+          <span class="status-dot" id="statusDot"></span>
+          <span id="status">កំពុងភ្ជាប់...</span>
+        </div>
+      </header>
+
+      <div class="chat" id="chat">
+        <div class="msg bot">
+          <div class="avatar">☀</div>
+          <div class="bubble">
+            សួស្តី! ខ្ញុំឈ្មោះ <strong>Uchiro</strong> — ជំនួយការ AI ផ្ទាល់ខ្លួនរបស់អ្នក។
+            ខ្ញុំអាចស្វែងរកអ៊ីនធឺណិត, មើលរូបភាព, សរសេរ document, និងចាំរឿងសំខាន់ៗអំពីអ្នក។ ចាប់ផ្តើមនិយាយបានហើយ!
+          </div>
+        </div>
+      </div>
+
+      <div class="image-preview" id="imagePreview" style="display:none;">
+        <img id="previewImg" src="" alt="preview" />
+        <button id="removeImage">✕</button>
+      </div>
+
+      <form class="inputbar" id="form">
+        <label class="attach-btn" title="ភ្ជាប់រូបភាព">
+          📎
+          <input type="file" id="imageInput" accept="image/*" hidden />
+        </label>
+        <textarea id="input" placeholder="សួរ Uchiro អ្វីមួយ..." rows="1"></textarea>
+        <button type="submit" id="sendBtn"><span>ផ្ញើ</span></button>
+      </form>
+    </main>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
