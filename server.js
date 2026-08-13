@@ -5,7 +5,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const Anthropic = require('@anthropic-ai/sdk');
+const { OpenAI } = require('openai');
 const PDFDocument = require('pdfkit');
 const { Document, Packer, Paragraph, TextRun } = require('docx');
 const fs = require('fs');
@@ -29,12 +29,14 @@ if (!process.env.ANTHROPIC_API_KEY) {
   process.exit(1);
 }
 
-// កំណត់ Anthropic SDK (Support ទាំង Official & Custom Proxy Base URL)
-const anthropicConfig = { apiKey: process.env.ANTHROPIC_API_KEY };
-if (process.env.ANTHROPIC_BASE_URL) {
-  anthropicConfig.baseURL = process.env.ANTHROPIC_BASE_URL;
-}
-const anthropic = new Anthropic(anthropicConfig);
+// Setup OpenAI SDK with Custom Base URL & Key
+const openai = new OpenAI({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  baseURL: process.env.ANTHROPIC_BASE_URL || 'https://llm.2006.lol/api/v1',
+});
+
+// Enforce Fable5 default
+const MODEL = process.env.MODEL_NAME || 'Fable5';
 
 // ============================================
 // FILE GENERATION HELPERS
@@ -74,33 +76,37 @@ async function createDocx(content, title) {
 }
 
 // ============================================
-// TOOL DEFINITIONS
+// TOOL DEFINITIONS (OpenAI Format)
 // ============================================
 const tools = [
   {
-    name: 'create_document',
-    description:
-      'បង្កើត file ជា PDF ឬ Word document សម្រាប់ user ទាញយក។ ប្រើ tool នេះនៅពេល user ស្នើសុំ report, document, letter, contract ឬអ្វីៗដែលគួរផ្តល់ជា file ដើម្បីរក្សាទុក/បោះពុម្ព/ចែករំលែក — មិនមែនគ្រាន់តែឆ្លើយសំណួរធម្មតា។',
-    input_schema: {
-      type: 'object',
-      properties: {
-        title: { type: 'string', description: 'ចំណងជើងឯកសារ' },
-        content: { type: 'string', description: 'ខ្លឹមសារពេញលេញនៃឯកសារ សរសេរឲ្យបានល្អិតល្អន់និងរៀបចំរបៀបរាយបញ្ជី' },
-        format: { type: 'string', enum: ['pdf', 'docx'], description: 'ប្រភេទ file ដែល user ចង់បាន (default: pdf)' },
+    type: 'function',
+    function: {
+      name: 'create_document',
+      description: 'បង្កើត file ជា PDF ឬ Word document សម្រាប់ user ទាញយក។',
+      parameters: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'ចំណងជើងឯកសារ' },
+          content: { type: 'string', description: 'ខ្លឹមសារពេញលេញនៃឯកសារ' },
+          format: { type: 'string', enum: ['pdf', 'docx'], description: 'ប្រភេទ file (default: pdf)' },
+        },
+        required: ['title', 'content'],
       },
-      required: ['title', 'content'],
     },
   },
   {
-    name: 'remember_fact',
-    description:
-      'រក្សាទុកព័ត៌មានសំខាន់អំពី user ជាអចិន្ត្រៃយ៍ សម្រាប់ចាំក្នុងការសន្ទនាលើកក្រោយ។ ប្រើនៅពេល user ប្រាប់ឈ្មោះ, ចំណូលចិត្ត, គម្រោង, ព័ត៌មានផ្ទាល់ខ្លួន ឬអ្វីៗដែលមានប្រយោជន៍ចាំក្នុងពេលអនាគត។ កុំប្រើសម្រាប់ព័ត៌មានបណ្តោះអាសន្នមិនសំខាន់។',
-    input_schema: {
-      type: 'object',
-      properties: {
-        fact: { type: 'string', description: 'ព័ត៌មានខ្លីមួយប្រយោគ ដែលគួរចាំ (ឧទាហរណ៍: "ឈ្មោះ user គឺ Sokha")' },
+    type: 'function',
+    function: {
+      name: 'remember_fact',
+      description: 'រក្សាទុកព័ត៌មានសំខាន់អំពី user ជាអចិន្ត្រៃយ៍',
+      parameters: {
+        type: 'object',
+        properties: {
+          fact: { type: 'string', description: 'ព័ត៌មានខ្លីមួយប្រយោគ' },
+        },
+        required: ['fact'],
       },
-      required: ['fact'],
     },
   },
 ];
@@ -114,7 +120,7 @@ app.post('/api/chat', async (req, res) => {
     if (!message && !image) return res.status(400).json({ error: 'សូមផ្ញើសារ' });
     if (!sessionId) return res.status(400).json({ error: 'sessionId ត្រូវការ' });
 
-    // ១. ទាញយក history ចាស់ + memory ពី database
+    // 1. Get History & Memory
     const pastMessages = getHistory(sessionId).map((m) => ({
       role: m.role,
       content: m.content,
@@ -122,90 +128,94 @@ app.post('/api/chat', async (req, res) => {
 
     const facts = getFacts(sessionId);
     const memoryBlock = facts.length
-      ? `\n\nរឿងដែលអ្នកចាំពី user (ប្រើប្រាស់ដោយធម្មជាតិ កុំសរសេរឡើងវិញត្រង់ៗ):\n${facts.map((f) => `- ${f.fact}`).join('\n')}`
+      ? `\n\nរឿងដែលអ្នកចាំពី user:\n${facts.map((f) => `- ${f.fact}`).join('\n')}`
       : '';
 
-    const systemPrompt = `អ្នកឈ្មោះ Uchiro — ជា AI assistant ផ្ទាល់ខ្លួនរបស់ user។ អត្តចរិកអ្នក: ឆ្លាត, ស្មោះត្រង់, មានថាមពល, ជួយអ្នកប្រើប្រាស់ដោយផ្ទាល់ និងកក់ក្តៅ។ ឆ្លើយជាភាសាដូចដែល user សរសេរមក (ខ្មែរ ឬ អង់គ្លេស)។${memoryBlock}`;
+    const systemPrompt = {
+      role: 'system',
+      content: `អ្នកឈ្មោះ Uchiro — ជា AI assistant ផ្ទាល់ខ្លួនរបស់ user។ អត្តចរិកអ្នក: ឆ្លាត, ស្មោះត្រង់, មានថាមពល, ជួយអ្នកប្រើប្រាស់ដោយផ្ទាល់ និងកក់ក្តៅ។ ឆ្លើយជាភាសាដូចដែល user សរសេរមក (ខ្មែរ ឬ អង់គ្លេស)។${memoryBlock}`,
+    };
 
-    // ២. រៀបចំ user message ថ្មី (Text + Image support)
-    const userContent = [];
+    // 2. Prepare User Content
+    let userContent = message || 'សូមមើលរូបភាពនេះ';
     if (image && image.base64 && image.mediaType) {
-      userContent.push({
-        type: 'image',
-        source: { type: 'base64', media_type: image.mediaType, data: image.base64 },
-      });
+      userContent = [
+        { type: 'text', text: message || 'សូមមើលរូបភាពនេះ' },
+        {
+          type: 'image_url',
+          image_url: { url: `data:${image.mediaType};base64,${image.base64}` },
+        },
+      ];
     }
-    userContent.push({ type: 'text', text: message || 'សូមមើលរូបភាពនេះ' });
 
-    let messages = [...pastMessages, { role: 'user', content: userContent }];
+    let messages = [systemPrompt, ...pastMessages, { role: 'user', content: userContent }];
 
-    // ៣. រក្សាទុកសាររបស់ user ចូល database
     saveMessage(sessionId, 'user', message || '[បានផ្ញើរូបភាព]');
 
     let downloadUrl = null;
     let finalText = '';
     let newFacts = [];
 
-    // ៤. Agent loop (Tool handling)
+    // 3. Agent Loop
     for (let turn = 0; turn < 5; turn++) {
-      const response = await anthropic.messages.create({
-        model: process.env.MODEL_NAME || 'claude-3-5-sonnet-20241022',
-        max_tokens: 2000,
-        system: systemPrompt,
-        tools,
-        messages,
+      const response = await openai.chat.completions.create({
+        model: MODEL,
+        messages: messages,
+        tools: tools,
+        tool_choice: 'auto',
       });
 
-      // ប្រមូល Text
-      const textBlocks = response.content.filter((b) => b.type === 'text');
-      if (textBlocks.length) {
-        finalText += textBlocks.map((b) => b.text).join('\n');
+      const responseMessage = response.choices[0].message;
+
+      if (responseMessage.content) {
+        finalText += responseMessage.content;
       }
 
-      // ប្រសិនបើ AI មិនបានហៅ Tool អ្វីទេ នោះបញ្ចប់ Loop
-      if (response.stop_reason !== 'tool_use') break;
+      // Check if tool called
+      const toolCalls = responseMessage.tool_calls;
+      if (!toolCalls || toolCalls.length === 0) {
+        break; // Finish if no tool calls
+      }
 
-      // បន្ថែម Assistant Response ចូល Memory
-      messages.push({ role: 'assistant', content: response.content });
+      messages.push(responseMessage);
 
-      // ដំណើរការ Custom Tools
-      const toolResults = [];
-      for (const block of response.content) {
-        if (block.type !== 'tool_use') continue;
+      for (const toolCall of toolCalls) {
+        const functionName = toolCall.function.name;
+        const functionArgs = JSON.parse(toolCall.function.arguments);
 
-        if (block.name === 'create_document') {
-          const { title, content, format = 'pdf' } = block.input;
+        if (functionName === 'create_document') {
+          const { title, content, format = 'pdf' } = functionArgs;
           const filename = format === 'docx' ? await createDocx(content, title) : createPDF(content, title);
           downloadUrl = `/downloads/${filename}`;
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: block.id,
+
+          messages.push({
+            tool_call_id: toolCall.id,
+            role: 'tool',
+            name: functionName,
             content: `File "${filename}" ត្រូវបានបង្កើតដោយជោគជ័យ។`,
           });
         }
 
-        if (block.name === 'remember_fact') {
-          const { fact } = block.input;
+        if (functionName === 'remember_fact') {
+          const { fact } = functionArgs;
           saveFact(sessionId, fact);
           newFacts.push(fact);
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: block.id,
+
+          messages.push({
+            tool_call_id: toolCall.id,
+            role: 'tool',
+            name: functionName,
             content: `ចាំរួចរាល់៖ "${fact}"`,
           });
         }
       }
-
-      if (toolResults.length === 0) break;
-      messages.push({ role: 'user', content: toolResults });
     }
 
-    // ៥. រក្សាទុកសាររបស់ Assistant ចូល database
     saveMessage(sessionId, 'assistant', finalText, downloadUrl);
 
     res.json({ reply: finalText, downloadUrl, usedWebSearch: false, newFacts });
   } catch (error) {
-    console.error('Error:', error.message);
+    console.error('❌ Error details:', error);
     res.status(500).json({
       error: 'មានបញ្ហា! សូមពិនិត្យ API key ឬ credit របស់អ្នក។',
       detail: error.message,
