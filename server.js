@@ -1,11 +1,10 @@
 // ============================================
-// AI CHATBOT SERVER v2 — FULL FIX (LLM Gateway)
+// AI CHATBOT SERVER v2 — LLM GATEWAY (FULL FIX)
 // ============================================
 
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const Anthropic = require('@anthropic-ai/sdk');
 const PDFDocument = require('pdfkit');
 const { Document, Packer, Paragraph, TextRun } = require('docx');
 const fs = require('fs');
@@ -16,7 +15,6 @@ const { saveMessage, getHistory, clearHistory, saveFact, getFacts, deleteFact } 
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// Ensure Downloads folder exists
 const DOWNLOADS_DIR = path.join(__dirname, 'public', 'downloads');
 if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
 
@@ -24,19 +22,12 @@ app.use(cors());
 app.use(express.json({ limit: '15mb' }));
 app.use(express.static('public'));
 
-const apiKey = process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY;
-if (!apiKey) {
-  console.error('❌ Missing API key in .env file!');
+const API_KEY = process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY;
+if (!API_KEY) {
+  console.error('❌ សូមដាក់ API KEY ក្នុង file .env ជាមុនសិន!');
   process.exit(1);
 }
 
-// Initialize Anthropic SDK pointing to llm.2006.lol
-const anthropic = new Anthropic({
-  apiKey: apiKey,
-  baseURL: process.env.ANTHROPIC_BASE_URL || 'https://llm.2006.lol/api/v1',
-});
-
-// Enforce model Fable5
 const MODEL = process.env.MODEL_NAME || 'Fable5';
 
 // ============================================
@@ -77,37 +68,7 @@ async function createDocx(content, title) {
 }
 
 // ============================================
-// TOOL DEFINITIONS
-// ============================================
-const tools = [
-  {
-    name: 'create_document',
-    description: 'បង្កើត file ជា PDF ឬ Word document សម្រាប់ user ទាញយក។',
-    input_schema: {
-      type: 'object',
-      properties: {
-        title: { type: 'string', description: 'ចំណងជើងឯកសារ' },
-        content: { type: 'string', description: 'ខ្លឹមសារពេញលេញនៃឯកសារ' },
-        format: { type: 'string', enum: ['pdf', 'docx'], description: 'ប្រភេទ file (default: pdf)' },
-      },
-      required: ['title', 'content'],
-    },
-  },
-  {
-    name: 'remember_fact',
-    description: 'រក្សាទុកព័ត៌មានសំខាន់អំពី user ជាអចិន្ត្រៃយ៍',
-    input_schema: {
-      type: 'object',
-      properties: {
-        fact: { type: 'string', description: 'ព័ត៌មានខ្លីមួយប្រយោគ' },
-      },
-      required: ['fact'],
-    },
-  },
-];
-
-// ============================================
-// MAIN CHAT ENDPOINT
+// MAIN CHAT ENDPOINT (OpenAI-compatible Direct Request)
 // ============================================
 app.post('/api/chat', async (req, res) => {
   try {
@@ -115,7 +76,7 @@ app.post('/api/chat', async (req, res) => {
     if (!message && !image) return res.status(400).json({ error: 'សូមផ្ញើសារ' });
     if (!sessionId) return res.status(400).json({ error: 'sessionId ត្រូវការ' });
 
-    // 1. Retrieve history & memory
+    // ១. រៀបចំ History
     const pastMessages = getHistory(sessionId).map((m) => ({
       role: m.role,
       content: m.content,
@@ -126,86 +87,57 @@ app.post('/api/chat', async (req, res) => {
       ? `\n\nរឿងដែលអ្នកចាំពី user:\n${facts.map((f) => `- ${f.fact}`).join('\n')}`
       : '';
 
-    const systemPrompt = `អ្នកឈ្មោះ Uchiro — ជា AI assistant ផ្ទាល់ខ្លួនរបស់ user។ ឆ្លើយជាភាសាដូចដែល user សរសេរមក (ខ្មែរ ឬ អង់គ្លេស)។${memoryBlock}`;
+    const systemMessage = {
+      role: 'system',
+      content: `អ្នកឈ្មោះ Uchiro — ជា AI assistant ផ្ទាល់ខ្លួនរបស់ user។ ឆ្លើយជាភាសាដូចដែល user សរសេរមក (ខ្មែរ ឬ អង់គ្លេស)។${memoryBlock}`,
+    };
 
-    // 2. Build user content block
-    const userContent = [];
+    // ២. រៀបចំ User Content (Text + Image support)
+    let userContent = message || 'សូមមើលរូបភាពនេះ';
     if (image && image.base64 && image.mediaType) {
-      userContent.push({
-        type: 'image',
-        source: { type: 'base64', media_type: image.mediaType, data: image.base64 },
-      });
+      userContent = [
+        { type: 'text', text: message || 'សូមមើលរូបភាពនេះ' },
+        {
+          type: 'image_url',
+          image_url: { url: `data:${image.mediaType};base64,${image.base64}` },
+        },
+      ];
     }
-    userContent.push({ type: 'text', text: message || 'សូមមើលរូបភាពនេះ' });
 
-    let messages = [...pastMessages, { role: 'user', content: userContent }];
+    const messages = [systemMessage, ...pastMessages, { role: 'user', content: userContent }];
 
     saveMessage(sessionId, 'user', message || '[បានផ្ញើរូបភាព]');
 
-    let downloadUrl = null;
-    let finalText = '';
-    let newFacts = [];
-
-    // 3. Agent loop
-    for (let turn = 0; turn < 5; turn++) {
-      const response = await anthropic.messages.create({
+    // ៣. ផ្ញើ Request ដោយផ្ទាល់ទៅកាន់ llm.2006.lol chat completions endpoint
+    const response = await fetch('https://llm.2006.lol/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${API_KEY}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      },
+      body: JSON.stringify({
         model: MODEL,
-        max_tokens: 2000,
-        system: systemPrompt,
-        tools: tools,
         messages: messages,
-      });
+        max_tokens: 2000,
+      }),
+    });
 
-      const textBlocks = response.content.filter((b) => b.type === 'text');
-      if (textBlocks.length) {
-        finalText += textBlocks.map((b) => b.text).join('\n');
-      }
-
-      if (response.stop_reason !== 'tool_use') break;
-
-      messages.push({ role: 'assistant', content: response.content });
-
-      const toolResults = [];
-      for (const block of response.content) {
-        if (block.type !== 'tool_use') continue;
-
-        if (block.name === 'create_document') {
-          const { title, content, format = 'pdf' } = block.input;
-          const filename = format === 'docx' ? await createDocx(content, title) : createPDF(content, title);
-          downloadUrl = `/downloads/${filename}`;
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: block.id,
-            content: `File "${filename}" ត្រូវបានបង្កើតដោយជោគជ័យ។`,
-          });
-        }
-
-        if (block.name === 'remember_fact') {
-          const { fact } = block.input;
-          saveFact(sessionId, fact);
-          newFacts.push(fact);
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: block.id,
-            content: `ចាំរួចរាល់៖ "${fact}"`,
-          });
-        }
-      }
-
-      if (toolResults.length === 0) break;
-      messages.push({ role: 'user', content: toolResults });
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error(`❌ Gateway Error (${response.status}):`, errText);
+      throw new Error(`Gateway Returned Status ${response.status}: ${errText}`);
     }
 
-    // 4. Save response to DB
-    saveMessage(sessionId, 'assistant', finalText, downloadUrl);
+    const data = await response.json();
+    const finalText = data.choices[0].message.content;
 
-    res.json({ reply: finalText, downloadUrl, usedWebSearch: false, newFacts });
+    // ៤. រក្សាទុក និងឆ្លើយតប
+    saveMessage(sessionId, 'assistant', finalText);
+
+    res.json({ reply: finalText });
   } catch (error) {
-    console.error('❌ Detailed Error Log:', {
-      status: error.status,
-      message: error.message,
-      errorDetails: error.error,
-    });
+    console.error('❌ Detailed Error Log:', error.message);
 
     res.status(500).json({
       error: 'មានបញ្ហា! សូមពិនិត្យ API key ឬ credit របស់អ្នក។',
@@ -215,36 +147,19 @@ app.post('/api/chat', async (req, res) => {
 });
 
 // ============================================
-// HISTORY ENDPOINTS
+// HISTORY & MEMORY ENDPOINTS
 // ============================================
-app.get('/api/history/:sessionId', (req, res) => {
-  res.json({ history: getHistory(req.params.sessionId) });
-});
-
-app.delete('/api/history/:sessionId', (req, res) => {
-  clearHistory(req.params.sessionId);
-  res.json({ ok: true });
-});
-
-// ============================================
-// MEMORY ENDPOINTS
-// ============================================
-app.get('/api/memory/:sessionId', (req, res) => {
-  res.json({ facts: getFacts(req.params.sessionId) });
-});
-
-app.delete('/api/memory/:factId', (req, res) => {
-  deleteFact(req.params.factId);
-  res.json({ ok: true });
-});
+app.get('/api/history/:sessionId', (req, res) => res.json({ history: getHistory(req.params.sessionId) }));
+app.delete('/api/history/:sessionId', (req, res) => { clearHistory(req.params.sessionId); res.json({ ok: true }); });
+app.get('/api/memory/:sessionId', (req, res) => res.json({ facts: getFacts(req.params.sessionId) }));
+app.delete('/api/memory/:factId', (req, res) => { deleteFact(req.params.factId); res.json({ ok: true }); });
 
 // ============================================
 // FILES CATALOG
 // ============================================
 app.get('/api/files', (req, res) => {
   try {
-    const files = fs
-      .readdirSync(DOWNLOADS_DIR)
+    const files = fs.readdirSync(DOWNLOADS_DIR)
       .filter((f) => f !== '.gitkeep')
       .map((f) => {
         const stat = fs.statSync(path.join(DOWNLOADS_DIR, f));
@@ -259,6 +174,4 @@ app.get('/api/files', (req, res) => {
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
-app.listen(PORT, () => {
-  console.log(`✅ Server ដំណើរការនៅ http://localhost:${PORT}`);
-});
+app.listen(PORT, () => console.log(`✅ Server ដំណើរការនៅ http://localhost:${PORT}`));
