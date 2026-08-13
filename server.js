@@ -1,11 +1,11 @@
 // ============================================
-// AI CHATBOT SERVER v2 — ដូច Claude.ai ជាងមុន
+// AI CHATBOT SERVER v2 — FULL FIX (LLM Gateway)
 // ============================================
 
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { OpenAI } = require('openai');
+const Anthropic = require('@anthropic-ai/sdk');
 const PDFDocument = require('pdfkit');
 const { Document, Packer, Paragraph, TextRun } = require('docx');
 const fs = require('fs');
@@ -14,9 +14,9 @@ const crypto = require('crypto');
 const { saveMessage, getHistory, clearHistory, saveFact, getFacts, deleteFact } = require('./db');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 
-// បង្កើត Folder សម្រាប់ទាញយក File ប្រសិនបើមិនទាន់មាន
+// Ensure Downloads folder exists
 const DOWNLOADS_DIR = path.join(__dirname, 'public', 'downloads');
 if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
 
@@ -24,18 +24,19 @@ app.use(cors());
 app.use(express.json({ limit: '15mb' }));
 app.use(express.static('public'));
 
-if (!process.env.ANTHROPIC_API_KEY) {
-  console.error('❌ សូមដាក់ ANTHROPIC_API_KEY ក្នុង file .env ជាមុនសិន!');
+const apiKey = process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY;
+if (!apiKey) {
+  console.error('❌ Missing API key in .env file!');
   process.exit(1);
 }
 
-// Setup OpenAI SDK with Custom Base URL & Key
-const openai = new OpenAI({
-  apiKey: process.env.ANTHROPIC_API_KEY,
+// Initialize Anthropic SDK pointing to llm.2006.lol
+const anthropic = new Anthropic({
+  apiKey: apiKey,
   baseURL: process.env.ANTHROPIC_BASE_URL || 'https://llm.2006.lol/api/v1',
 });
 
-// Enforce Fable5 default
+// Enforce model Fable5
 const MODEL = process.env.MODEL_NAME || 'Fable5';
 
 // ============================================
@@ -76,37 +77,31 @@ async function createDocx(content, title) {
 }
 
 // ============================================
-// TOOL DEFINITIONS (OpenAI Format)
+// TOOL DEFINITIONS
 // ============================================
 const tools = [
   {
-    type: 'function',
-    function: {
-      name: 'create_document',
-      description: 'បង្កើត file ជា PDF ឬ Word document សម្រាប់ user ទាញយក។',
-      parameters: {
-        type: 'object',
-        properties: {
-          title: { type: 'string', description: 'ចំណងជើងឯកសារ' },
-          content: { type: 'string', description: 'ខ្លឹមសារពេញលេញនៃឯកសារ' },
-          format: { type: 'string', enum: ['pdf', 'docx'], description: 'ប្រភេទ file (default: pdf)' },
-        },
-        required: ['title', 'content'],
+    name: 'create_document',
+    description: 'បង្កើត file ជា PDF ឬ Word document សម្រាប់ user ទាញយក។',
+    input_schema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'ចំណងជើងឯកសារ' },
+        content: { type: 'string', description: 'ខ្លឹមសារពេញលេញនៃឯកសារ' },
+        format: { type: 'string', enum: ['pdf', 'docx'], description: 'ប្រភេទ file (default: pdf)' },
       },
+      required: ['title', 'content'],
     },
   },
   {
-    type: 'function',
-    function: {
-      name: 'remember_fact',
-      description: 'រក្សាទុកព័ត៌មានសំខាន់អំពី user ជាអចិន្ត្រៃយ៍',
-      parameters: {
-        type: 'object',
-        properties: {
-          fact: { type: 'string', description: 'ព័ត៌មានខ្លីមួយប្រយោគ' },
-        },
-        required: ['fact'],
+    name: 'remember_fact',
+    description: 'រក្សាទុកព័ត៌មានសំខាន់អំពី user ជាអចិន្ត្រៃយ៍',
+    input_schema: {
+      type: 'object',
+      properties: {
+        fact: { type: 'string', description: 'ព័ត៌មានខ្លីមួយប្រយោគ' },
       },
+      required: ['fact'],
     },
   },
 ];
@@ -120,7 +115,7 @@ app.post('/api/chat', async (req, res) => {
     if (!message && !image) return res.status(400).json({ error: 'សូមផ្ញើសារ' });
     if (!sessionId) return res.status(400).json({ error: 'sessionId ត្រូវការ' });
 
-    // 1. Get History & Memory
+    // 1. Retrieve history & memory
     const pastMessages = getHistory(sessionId).map((m) => ({
       role: m.role,
       content: m.content,
@@ -131,24 +126,19 @@ app.post('/api/chat', async (req, res) => {
       ? `\n\nរឿងដែលអ្នកចាំពី user:\n${facts.map((f) => `- ${f.fact}`).join('\n')}`
       : '';
 
-    const systemPrompt = {
-      role: 'system',
-      content: `អ្នកឈ្មោះ Uchiro — ជា AI assistant ផ្ទាល់ខ្លួនរបស់ user។ អត្តចរិកអ្នក: ឆ្លាត, ស្មោះត្រង់, មានថាមពល, ជួយអ្នកប្រើប្រាស់ដោយផ្ទាល់ និងកក់ក្តៅ។ ឆ្លើយជាភាសាដូចដែល user សរសេរមក (ខ្មែរ ឬ អង់គ្លេស)។${memoryBlock}`,
-    };
+    const systemPrompt = `អ្នកឈ្មោះ Uchiro — ជា AI assistant ផ្ទាល់ខ្លួនរបស់ user។ ឆ្លើយជាភាសាដូចដែល user សរសេរមក (ខ្មែរ ឬ អង់គ្លេស)។${memoryBlock}`;
 
-    // 2. Prepare User Content
-    let userContent = message || 'សូមមើលរូបភាពនេះ';
+    // 2. Build user content block
+    const userContent = [];
     if (image && image.base64 && image.mediaType) {
-      userContent = [
-        { type: 'text', text: message || 'សូមមើលរូបភាពនេះ' },
-        {
-          type: 'image_url',
-          image_url: { url: `data:${image.mediaType};base64,${image.base64}` },
-        },
-      ];
+      userContent.push({
+        type: 'image',
+        source: { type: 'base64', media_type: image.mediaType, data: image.base64 },
+      });
     }
+    userContent.push({ type: 'text', text: message || 'សូមមើលរូបភាពនេះ' });
 
-    let messages = [systemPrompt, ...pastMessages, { role: 'user', content: userContent }];
+    let messages = [...pastMessages, { role: 'user', content: userContent }];
 
     saveMessage(sessionId, 'user', message || '[បានផ្ញើរូបភាព]');
 
@@ -156,66 +146,67 @@ app.post('/api/chat', async (req, res) => {
     let finalText = '';
     let newFacts = [];
 
-    // 3. Agent Loop
+    // 3. Agent loop
     for (let turn = 0; turn < 5; turn++) {
-      const response = await openai.chat.completions.create({
+      const response = await anthropic.messages.create({
         model: MODEL,
-        messages: messages,
+        max_tokens: 2000,
+        system: systemPrompt,
         tools: tools,
-        tool_choice: 'auto',
+        messages: messages,
       });
 
-      const responseMessage = response.choices[0].message;
-
-      if (responseMessage.content) {
-        finalText += responseMessage.content;
+      const textBlocks = response.content.filter((b) => b.type === 'text');
+      if (textBlocks.length) {
+        finalText += textBlocks.map((b) => b.text).join('\n');
       }
 
-      // Check if tool called
-      const toolCalls = responseMessage.tool_calls;
-      if (!toolCalls || toolCalls.length === 0) {
-        break; // Finish if no tool calls
-      }
+      if (response.stop_reason !== 'tool_use') break;
 
-      messages.push(responseMessage);
+      messages.push({ role: 'assistant', content: response.content });
 
-      for (const toolCall of toolCalls) {
-        const functionName = toolCall.function.name;
-        const functionArgs = JSON.parse(toolCall.function.arguments);
+      const toolResults = [];
+      for (const block of response.content) {
+        if (block.type !== 'tool_use') continue;
 
-        if (functionName === 'create_document') {
-          const { title, content, format = 'pdf' } = functionArgs;
+        if (block.name === 'create_document') {
+          const { title, content, format = 'pdf' } = block.input;
           const filename = format === 'docx' ? await createDocx(content, title) : createPDF(content, title);
           downloadUrl = `/downloads/${filename}`;
-
-          messages.push({
-            tool_call_id: toolCall.id,
-            role: 'tool',
-            name: functionName,
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: block.id,
             content: `File "${filename}" ត្រូវបានបង្កើតដោយជោគជ័យ។`,
           });
         }
 
-        if (functionName === 'remember_fact') {
-          const { fact } = functionArgs;
+        if (block.name === 'remember_fact') {
+          const { fact } = block.input;
           saveFact(sessionId, fact);
           newFacts.push(fact);
-
-          messages.push({
-            tool_call_id: toolCall.id,
-            role: 'tool',
-            name: functionName,
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: block.id,
             content: `ចាំរួចរាល់៖ "${fact}"`,
           });
         }
       }
+
+      if (toolResults.length === 0) break;
+      messages.push({ role: 'user', content: toolResults });
     }
 
+    // 4. Save response to DB
     saveMessage(sessionId, 'assistant', finalText, downloadUrl);
 
     res.json({ reply: finalText, downloadUrl, usedWebSearch: false, newFacts });
   } catch (error) {
-    console.error('❌ Error details:', error);
+    console.error('❌ Detailed Error Log:', {
+      status: error.status,
+      message: error.message,
+      errorDetails: error.error,
+    });
+
     res.status(500).json({
       error: 'មានបញ្ហា! សូមពិនិត្យ API key ឬ credit របស់អ្នក។',
       detail: error.message,
