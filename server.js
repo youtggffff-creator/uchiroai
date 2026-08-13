@@ -1,7 +1,6 @@
 // ============================================
 // AI CHATBOT SERVER v2 — ដូច Claude.ai ជាងមុន
 // ============================================
-// Features: Web search ពិត | Image upload | Database (SQLite) | Smart file detection (Tool Use)
 
 require('dotenv').config();
 const express = require('express');
@@ -21,7 +20,7 @@ const DOWNLOADS_DIR = path.join(__dirname, 'public', 'downloads');
 if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
 
 app.use(cors());
-app.use(express.json({ limit: '15mb' })); // ធំជាងធម្មតា ព្រោះ image base64 ធំ
+app.use(express.json({ limit: '15mb' }));
 app.use(express.static('public'));
 
 if (!process.env.ANTHROPIC_API_KEY) {
@@ -69,11 +68,10 @@ function slugify(text) {
 }
 
 // ============================================
-// TOOL DEFINITIONS — Claude សម្រេចចិត្តខ្លួនឯងពេលណាត្រូវហៅ
+// TOOL DEFINITIONS
 // ============================================
 const tools = [
   {
-    // Custom tool — យើងគ្រប់គ្រង logic ខ្លួនឯង
     name: 'create_document',
     description:
       'បង្កើត file ជា PDF ឬ Word document សម្រាប់ user ទាញយក។ ប្រើ tool នេះនៅពេល user ស្នើសុំ report, document, letter, contract ឬអ្វីៗដែលគួរផ្តល់ជា file ដើម្បីរក្សាទុក/បោះពុម្ព/ចែករំលែក — មិនមែនគ្រាន់តែឆ្លើយសំណួរធម្មតា។',
@@ -88,18 +86,13 @@ const tools = [
     },
   },
   {
-    // Server-side tool — Anthropic ដំណើរការស្វ័យប្រវត្តិ (យើងមិនត្រូវសរសេរ logic)
-    type: 'web_search_20250305',
-    name: 'web_search',
-  },
-  {
     name: 'remember_fact',
     description:
       'រក្សាទុកព័ត៌មានសំខាន់អំពី user ជាអចិន្ត្រៃយ៍ សម្រាប់ចាំក្នុងការសន្ទនាលើកក្រោយ។ ប្រើនៅពេល user ប្រាប់ឈ្មោះ, ចំណូលចិត្ត, គម្រោង, ព័ត៌មានផ្ទាល់ខ្លួន ឬអ្វីៗដែលមានប្រយោជន៍ចាំក្នុងពេលអនាគត។ កុំប្រើសម្រាប់ព័ត៌មានបណ្តោះអាសន្នមិនសំខាន់។',
     input_schema: {
       type: 'object',
       properties: {
-        fact: { type: 'string', description: 'ព័ត៌មានខ្លីមួយប្រយោគ ដែលគួរចាំ (ឧទាហរណ៍: "ឈ្មោះ user គឺ Sokha", "user កំពុងសាងសង់ store លក់ស្បែកជើង")' },
+        fact: { type: 'string', description: 'ព័ត៌មានខ្លីមួយប្រយោគ ដែលគួរចាំ (ឧទាហរណ៍: "ឈ្មោះ user គឺ Sokha")' },
       },
       required: ['fact'],
     },
@@ -115,7 +108,7 @@ app.post('/api/chat', async (req, res) => {
     if (!message && !image) return res.status(400).json({ error: 'សូមផ្ញើសារ' });
     if (!sessionId) return res.status(400).json({ error: 'sessionId ត្រូវការ' });
 
-    // ១. ទាញយក history ចាស់ + memory ដែលធ្លាប់ចាំពី database
+    // ១. ទាញយក history ចាស់ + memory
     const pastMessages = getHistory(sessionId).map((m) => ({
       role: m.role,
       content: m.content,
@@ -128,7 +121,7 @@ app.post('/api/chat', async (req, res) => {
 
     const systemPrompt = `អ្នកឈ្មោះ Uchiro — ជា AI assistant ផ្ទាល់ខ្លួនរបស់ user។ អត្តចរិកអ្នក: ឆ្លាត, ស្មោះត្រង់, មានថាមពល, ជួយអ្នកប្រើប្រាស់ដោយផ្ទាល់ និងកក់ក្តៅ។ ឆ្លើយជាភាសាដូចដែល user សរសេរមក (ខ្មែរ ឬ អង់គ្លេស)។${memoryBlock}`;
 
-    // ២. សាងសង់ user message ថ្មី (អាចមាន text + image)
+    // ២. សាងសង់ user message
     const userContent = [];
     if (image) {
       userContent.push({
@@ -140,40 +133,30 @@ app.post('/api/chat', async (req, res) => {
 
     let messages = [...pastMessages, { role: 'user', content: userContent }];
 
-    // ៣. Save user message ចូល database (សម្រាប់ text; រូបភាពមិន save ជា base64 ដើម្បីសន្សំទំហំ)
+    // ៣. Save user message
     saveMessage(sessionId, 'user', message || '[បានផ្ញើរូបភាព]');
 
     let downloadUrl = null;
     let finalText = '';
-    let usedWebSearch = false;
     let newFacts = [];
 
-    // ៤. Agent loop — Claude អាចហៅ tool ច្រើនដងជាប់គ្នា រហូតដល់ចប់
+    // ៤. Agent loop
     for (let turn = 0; turn < 5; turn++) {
       const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6',
+        model: 'claude-3-5-sonnet-20241022', // ✅ Fixed model name
         max_tokens: 2000,
         system: systemPrompt,
         tools,
         messages,
       });
 
-      // ប្រមូល text ដែល Claude ឆ្លើយ
       const textBlocks = response.content.filter((b) => b.type === 'text');
       if (textBlocks.length) finalText += textBlocks.map((b) => b.text).join('\n');
 
-      // web_search ជា server-side tool — Anthropic ដំណើរការស្រេចក្នុង response តែម្តង
-      // (block type ជា 'server_tool_use' / 'web_search_tool_result', មិនមែន 'tool_use' ធម្មតា)
-      if (response.content.some((b) => b.type === 'server_tool_use' && b.name === 'web_search')) {
-        usedWebSearch = true;
-      }
+      if (response.stop_reason !== 'tool_use') break;
 
-      if (response.stop_reason !== 'tool_use') break; // Claude ឆ្លើយចប់ហើយ (custom tool គ្មានទៀត)
-
-      // ដាក់ assistant turn (រួមទាំង tool_use blocks) ចូល messages
       messages.push({ role: 'assistant', content: response.content });
 
-      // ដំណើរការ custom tool calls (create_document) — web_search Anthropic ធ្វើស្រេចហើយ
       const toolResults = [];
       for (const block of response.content) {
         if (block.type !== 'tool_use') continue;
@@ -201,14 +184,14 @@ app.post('/api/chat', async (req, res) => {
         }
       }
 
-      if (toolResults.length === 0) break; // គ្មាន custom tool ត្រូវឆ្លើយតប (web_search server-side ស្រេច)
+      if (toolResults.length === 0) break;
       messages.push({ role: 'user', content: toolResults });
     }
 
-    // ៥. Save assistant reply ចូល database
+    // ៥. Save assistant reply
     saveMessage(sessionId, 'assistant', finalText, downloadUrl);
 
-    res.json({ reply: finalText, downloadUrl, usedWebSearch, newFacts });
+    res.json({ reply: finalText, downloadUrl, usedWebSearch: false, newFacts });
   } catch (error) {
     console.error('Error:', error.message);
     res.status(500).json({
@@ -243,7 +226,7 @@ app.delete('/api/memory/:factId', (req, res) => {
 });
 
 // ============================================
-// FILES CATALOG — បញ្ជី file ដែលបានបង្កើតរួច
+// FILES CATALOG
 // ============================================
 app.get('/api/files', (req, res) => {
   const files = fs
